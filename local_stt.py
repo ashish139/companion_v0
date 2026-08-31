@@ -3,7 +3,7 @@ local_stt.py
 ------------
 Offline English speech recognition. No API key, no network.
 
-    mic ──► cheap loudness gate ──► Silero VAD ──► Whisper ──► text
+    mic --> cheap loudness gate --> Silero VAD --> Whisper --> text
 
 Why two stages of detection?
 
@@ -32,6 +32,16 @@ import time
 import numpy as np
 
 import audio_in
+import config
+
+# Whisper has never heard the robot's name, so left alone it guesses wildly:
+# "Golu" came out as "Hello", "Galoo", "Galu", "Go look" and "Galo" depending
+# on how it was said. `initial_prompt` is Whisper's built-in way to bias its
+# vocabulary - we hand it a sentence containing the name and the commands, and
+# it becomes far more likely to spell them the way we expect.
+_PROMPT = (f"{config.WAKE_WORD}, follow me. "
+           f"{config.WAKE_WORD}, stop. "
+           f"Hey {config.WAKE_WORD}.")
 
 SAMPLE_RATE = 16000
 
@@ -116,6 +126,43 @@ def _contains_speech(audio):
     return audio[start:end]
 
 
+def looks_degenerate(text):
+    """
+    True if Whisper fell into a repetition loop.
+
+    Fed borderline audio it sometimes emits the same phrase over and over -
+    a real capture here produced "Good luck." seventy-five times. That is
+    never a command, and acting on it makes the robot apologise at noise, so
+    we throw the whole transcript away.
+    """
+    words = text.split()
+    if len(words) < 8:
+        return False
+    for size in (1, 2, 3):
+        first = tuple(words[:size])
+        repeats = sum(1 for i in range(0, len(words) - size + 1, size)
+                      if tuple(words[i:i + size]) == first)
+        if repeats >= 4 and repeats * size > len(words) * 0.6:
+            return True
+    return False
+
+
+def transcribe(speech):
+    """
+    Run Whisper on a clip that has already been trimmed to speech.
+
+    The live loop and the tests both go through here on purpose. An earlier
+    version had the tests call the model directly with their own arguments,
+    which meant they silently skipped the initial_prompt and reported failures
+    the real app did not have.
+    """
+    segments, _info = _model.transcribe(
+        speech, language="en", beam_size=1, temperature=0.0,
+        condition_on_previous_text=False, initial_prompt=_PROMPT,
+    )
+    return " ".join(s.text for s in segments).strip()
+
+
 def next_utterance(timeout=None):
     """
     Wait for one spoken utterance and return its text, or None.
@@ -175,13 +222,15 @@ def next_utterance(timeout=None):
             continue
 
         try:
-            segments, _info = _model.transcribe(
-                speech, language="en", beam_size=1, temperature=0.0,
-                condition_on_previous_text=False,
-            )
-            text = " ".join(s.text for s in segments).strip()
+            text = transcribe(speech)
         except Exception as exc:
             print(f"[local-stt] transcription failed: {exc}")
+            continue
+
+        if looks_degenerate(text):
+            if _debug:
+                print(f"[local-stt] discarded a repetition loop: "
+                      f"{text[:60]!r}...")
             continue
 
         if _debug:
@@ -200,7 +249,7 @@ if __name__ == "__main__":
         raise SystemExit(f"microphone unavailable: {audio_in.last_error()}")
 
     audio_in.arm_capture()
-    print("\nSpeak. Try 'Milo, follow me' and 'stop'. Ctrl+C to quit.\n")
+    print("\nSpeak. Try 'Golu, follow me' and 'stop'. Ctrl+C to quit.\n")
     try:
         while True:
             text = next_utterance()

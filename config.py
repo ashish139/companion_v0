@@ -33,11 +33,22 @@ PICOVOICE_ACCESS_KEY = _get("PICOVOICE_ACCESS_KEY")
 SARVAM_API_KEY = _get("SARVAM_API_KEY")
 
 # --- wake word --------------------------------------------------------------
-# The name you say to wake the robot. "Milo" is NOT one of Porcupine's
-# built-in keywords, so to actually use it you must train a custom keyword
-# (free) at https://console.picovoice.ai, download the Windows .ppn file, and
-# point WAKE_WORD_PPN at it.
-WAKE_WORD = _get("WAKE_WORD", "Milo")
+# The name you say to wake the robot.
+#
+# In the offline backend this is all you need to change - the name is spotted
+# in the Whisper transcript, so renaming the robot is one line.
+#
+# For the Sarvam backend it also needs a custom Porcupine keyword: "Golu" is
+# not one of the built-ins, so train it (free) at
+# https://console.picovoice.ai and point WAKE_WORD_PPN at the .ppn.
+WAKE_WORD = _get("WAKE_WORD", "Golu")
+
+# Whisper has never heard the robot's name, so it guesses at the spelling.
+# These are the guesses we also accept. Comma-separated; leave blank to use
+# the built-in list in commands.py for the current name.
+WAKE_VARIANTS = [v.strip().lower()
+                 for v in (_get("WAKE_VARIANTS", "") or "").split(",")
+                 if v.strip()]
 
 # Path to a custom .ppn keyword file. If unset we fall back to a built-in.
 WAKE_WORD_PPN = _get("WAKE_WORD_PPN")

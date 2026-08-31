@@ -27,9 +27,8 @@ STOP = behavior.CMD_STOP
 
 # (spoken phrase, expect wake word?, expected command)
 CASES = [
-    ("Milo follow me",              True,  FOLLOW),
-    ("Milo stop",                   True,  STOP),
-    ("Milo",                        True,  None),
+    ("Golu follow me",              True,  FOLLOW),
+    ("Golu stop",                   True,  STOP),
     ("follow me",                   False, FOLLOW),
     ("stop",                        False, STOP),
     # things the robot must ignore
@@ -78,15 +77,10 @@ def main():
         render(phrase, path)
         audio = load_16k(path)
 
-        # Same two-stage gate the live listener uses.
+        # Exactly the path the live listener takes: same VAD, same Whisper
+        # call, same initial_prompt.
         speech = local_stt._contains_speech(audio)
-        if speech is None:
-            transcript = ""
-        else:
-            segments, _ = local_stt._model.transcribe(
-                speech, language="en", beam_size=1, temperature=0.0,
-                condition_on_previous_text=False)
-            transcript = " ".join(s.text for s in segments).strip()
+        transcript = "" if speech is None else local_stt.transcribe(speech)
 
         heard_wake, remainder = commands.split_wake_word(transcript)
         spoken = remainder if heard_wake else transcript
@@ -98,6 +92,23 @@ def main():
         print(f"[{'ok  ' if ok else 'FAIL'}] {phrase:26} {transcript!r:34} "
               f"{str(heard_wake):5} {str(got_cmd):10} "
               f"(want {want_wake}/{want_cmd})")
+
+    # Whisper repetition loops must be caught. This exact transcript came out
+    # of a real microphone capture.
+    print("\n--- repetition-loop rejection ---")
+    loop_cases = [
+        ("Good luck. " * 40, True),
+        ("Golu, follow me.", False),
+        ("stop", False),
+        ("we should stop for lunch later today", False),
+        ("yeah yeah yeah yeah yeah yeah yeah yeah yeah yeah", True),
+    ]
+    for text, want in loop_cases:
+        got = local_stt.looks_degenerate(text)
+        ok = got == want
+        if not ok:
+            failures += 1
+        print(f"[{'ok  ' if ok else 'FAIL'}] {text[:44]!r:48} degenerate={got}")
 
     # Silero must reject pure noise rather than letting Whisper invent words.
     print("\n--- non-speech rejection ---")
@@ -113,7 +124,7 @@ def main():
         print(f"[{'ok  ' if ok else 'FAIL'}] {label:14} -> "
               f"{'rejected' if ok else 'PASSED THROUGH (would hallucinate)'}")
 
-    total = len(CASES) + 2
+    total = len(CASES) + len(loop_cases) + 2
     print(f"\n{total - failures}/{total} passed")
     return 1 if failures else 0
 

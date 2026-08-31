@@ -3,9 +3,9 @@ voice.py
 --------
 The conversation loop, on its own thread.
 
-    SLEEPING ──"Milo"──► LISTENING ──you stop talking──► PROCESSING
-        ▲                                                     │
-        └──────────── reply finishes ◄──── SPEAKING ◄─────────┘
+    SLEEPING --"Golu"--> LISTENING --you stop talking--> PROCESSING
+        ^                                                     |
+        +------------- reply finishes <---- SPEAKING <--------+
 
 The camera loop in main.py never waits for any of this. It reads
 voice.state() for a label to print, and gets a callback when a command is
@@ -17,7 +17,7 @@ There are two backends, chosen automatically at startup:
           Everything runs on this laptop. Silero VAD finds your speech,
           Whisper transcribes it, and the robot's name is spotted in the
           transcript. Because the name and the command arrive in the same
-          transcript, you can say "Milo, follow me" in one breath.
+          transcript, you can say "Golu, follow me" in one breath.
 
   SARVAM  (needs PICOVOICE_ACCESS_KEY and SARVAM_API_KEY)
           Porcupine listens for the name on-device, then Sarvam's realtime
@@ -45,6 +45,11 @@ SPEAKING = "SPEAKING"
 
 # How long the robot stays awake waiting for a command after just its name.
 AWAKE_SECONDS = 8.0
+
+# Longest an utterance can be and still plausibly be a command. Anything
+# longer, said without the robot's name, is treated as overheard conversation
+# and ignored in silence.
+MAX_COMMAND_WORDS = 10
 
 _state = SLEEPING
 _state_lock = threading.Lock()
@@ -163,6 +168,12 @@ def _run_local():
             # Just the name on its own - acknowledge and wait for the command.
             _speak_and_wait("Yes?")
             awake_until = time.time() + AWAKE_SECONDS
+            continue
+
+        # A long sentence is somebody talking, not somebody giving an order.
+        # Without this the robot apologises at every overheard conversation
+        # for as long as it happens to be awake.
+        if not heard_name and len(spoken.split()) > MAX_COMMAND_WORDS:
             continue
 
         acted = _dispatch(spoken)

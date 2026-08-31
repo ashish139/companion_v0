@@ -30,6 +30,7 @@ import re
 import unicodedata
 
 import behavior
+import config
 
 # Words allowed to appear around a command without invalidating it.
 # Keep this SHORT. Every word added here widens what counts as a command.
@@ -189,14 +190,57 @@ def reply_for(command, heard_text):
     return None
 
 
-# Ways Whisper actually spells the robot's name. It has never heard of
-# "Milo", so it guesses, and these are the guesses worth accepting.
-# Each entry is matched as a whole word (or pair of words), never a substring,
-# so "mile" or "mild" will not wake the robot.
-WAKE_VARIANTS = [
-    "milo", "mylo", "meelo", "milow", "milo's",
-    "my low", "mee lo", "my lo",
-]
+# Ways Whisper actually spells the robot's name.
+#
+# Whisper has never heard of "Golu", so it guesses, and it guesses differently
+# depending on how you say it. These are the spellings we also accept, found
+# by running real audio through the recogniser (see test_wake_variants.py).
+#
+# Each entry is matched as a whole word, or a whole pair of words - never as a
+# substring - so "gold" or "golf" will not wake the robot.
+# These lists come from actually running audio through Whisper, not guesswork.
+# See test_wake_variants.py, which regenerates the evidence.
+#
+# Two spellings are deliberately EXCLUDED for "golu":
+#   "hello"  - tiny.en sometimes collapses "Golu" to "Hello". Accepting it
+#              would wake the robot every time anyone greets anyone.
+#   "gala"   - a real English word, so it would fire on ordinary speech.
+# Both are common enough that a missed wake is far better than a false one.
+_KNOWN_VARIANTS = {
+    # Single nonsense tokens only. Two-word spellings Whisper also produced
+    # ("go lu", "go loo", "go lou") were dropped after a live run woke the
+    # robot on background conversation - phrases like "go look" and "go to the
+    # loo" are far too ordinary. They are barely needed now that
+    # local_stt.py feeds the name to Whisper as an initial_prompt, which makes
+    # it spell "Golu" correctly on every pronunciation we tested.
+    "golu": [
+        "golu", "gholu", "gollu", "goloo", "golou", "goolu", "gulu",
+        "galu", "galoo", "galud", "galug", "golug", "galo", "gullogue",
+    ],
+    "milo": ["milo", "mylo", "meelo", "milow", "my low", "mee lo", "my lo"],
+}
+
+
+def _build_wake_variants():
+    """
+    Work out which spellings count as the robot's name.
+
+    Order of preference:
+      1. WAKE_VARIANTS in .env, if you have tuned it yourself
+      2. the built-in list for this name
+      3. just the name itself, for a name we know nothing about
+    """
+    name = (config.WAKE_WORD or "").strip().lower()
+    if config.WAKE_VARIANTS:
+        variants = list(config.WAKE_VARIANTS)
+    else:
+        variants = list(_KNOWN_VARIANTS.get(name, []))
+    if name and name not in variants:
+        variants.insert(0, name)
+    return variants
+
+
+WAKE_VARIANTS = _build_wake_variants()
 
 
 def split_wake_word(text):

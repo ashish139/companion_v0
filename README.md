@@ -6,7 +6,7 @@ robot: the movement commands are printed instead of driven.
 ```
 webcam ──► YOLO person detector ──► LEFT / CENTER / RIGHT ─┐
                                                            ├─► state machine ──► TURN_LEFT / FORWARD / TURN_RIGHT / STOP
-mic ──► "Milo" ──► speech to text ──► command matching ────┘         │
+mic ──► "Golu" ──► speech to text ──► command matching ────┘         │
                                                                      └─► text to speech ──► speaker
 ```
 
@@ -22,7 +22,7 @@ Adding two keys unlocks Hindi and barge-in.
 | Languages | English | English, Hindi, Hinglish |
 | Wake word | name spotted in the transcript | Porcupine, on-device |
 | Barge-in | no | yes |
-| "Milo, follow me" in one breath | yes | no, name first |
+| "Golu, follow me" in one breath | yes | no, name first |
 
 The backend is chosen automatically: Sarvam if both keys are present,
 otherwise local. Force one with `--voice-backend local|sarvam`.
@@ -41,13 +41,15 @@ Tested on Windows 11, Python 3.14, Intel i5-1345U (CPU only).
 | Robot state machine | **working** — 8/8 |
 | Stale-box fix (`--detect-every`) | **working** — regression test passes |
 | Command matching | **working** — 43/43, rejects "we should stop for lunch" |
-| Local speech chain (VAD → Whisper → command) | **working** — 10/10 on rendered speech |
+| Local speech chain (VAD → Whisper → command) | **working** — 14/14 |
+| Wake word "Golu" recognised | **working** — 7/7 pronunciations, all transcribe as "Golu" |
 | Live mic → VAD → Whisper | **working** — transcribed real room speech; noise discarded |
-| Wake-word gating against real conversation | **working** — 4 real utterances, 0 false triggers |
-| Conversation flow rules | **working** — 9/9 |
+| Wake-word gating against real conversation | **working** — real overheard speech, 0 false triggers |
+| Repetition-loop rejection | **working** — a real 75x "Good luck." capture is discarded |
+| Conversation flow rules | **working** — 10/10 |
 | Keyboard control + clean exit | **working** |
 | Graceful degradation with no keys | **working** |
-| **Live "Milo, follow me" spoken by a human** | **untested** — needs you to say it |
+| **Live "Golu, follow me" spoken by a human** | **untested** — needs you to say it |
 | Sarvam STT / TTS, Porcupine, Hindi, barge-in | **untested** — no API keys available |
 
 Everything in the local chain has been verified except a human actually
@@ -61,10 +63,10 @@ speaking the phrase, which no automated test can do.
 
 Then say:
 
-> **"Milo, follow me"**
+> **"Golu, follow me"**
 
-or say **"Milo"**, wait for it to answer *"Yes?"*, then say **"follow me"**.
-To stop: **"Milo, stop"**.
+or say **"Golu"**, wait for it to answer *"Yes?"*, then say **"follow me"**.
+To stop: **"Golu, stop"**.
 
 A bare "follow me" with no name is deliberately ignored, so ordinary
 conversation near the laptop does nothing.
@@ -76,7 +78,7 @@ ROBOT STATE : FOLLOWING
 VOICE STATE : LISTENING
 PERSON      : CENTER
 ACTION      : FORWARD
-LAST HEARD  : Milo, follow me
+LAST HEARD  : Golu, follow me
 ```
 
 ### Keys (click the video window first)
@@ -101,7 +103,7 @@ That is enough for English. For Hindi and barge-in, copy `.env.example` to
 | `PICOVOICE_ACCESS_KEY` | https://console.picovoice.ai (free) |
 | `SARVAM_API_KEY` | https://dashboard.sarvam.ai |
 
-**"Milo" is not one of Porcupine's built-in wake words** (those are
+**"Golu" is not one of Porcupine's built-in wake words** (those are
 `porcupine`, `bumblebee`, `computer`, `jarvis`, `alexa`...). For the Sarvam
 backend you must train a custom one at console.picovoice.ai, pick
 **Windows (x86_64)**, and set `WAKE_WORD_PPN` to the downloaded `.ppn`.
@@ -111,7 +113,7 @@ so renaming the robot is one line in `.env`.
 ## Voice interaction states
 
 ```
-SLEEPING ──"Milo"──► LISTENING ──you stop talking──► PROCESSING
+SLEEPING ──"Golu"──► LISTENING ──you stop talking──► PROCESSING
     ▲                                                     │
     └──────────── reply finishes ◄──── SPEAKING ◄─────────┘
 ```
@@ -134,6 +136,37 @@ It now uses two stages:
 
 Only what survives both reaches Whisper. The gate can afford to be low
 precisely because something smarter sits behind it.
+
+### Teaching Whisper the robot's name
+
+Whisper has never heard of "Golu", so left to itself it guesses — measured
+outputs included `Hello`, `Galoo`, `Galu`, `Go look`, `Galo` and `Gullogue`.
+Chasing those spellings is hopeless, and accepting `Hello` as the wake word
+would have the robot answering every greeting in the room.
+
+The fix is Whisper's own `initial_prompt`, which biases its vocabulary. We
+hand it a sentence containing the name and the commands:
+
+```
+"Golu, follow me. Golu, stop. Hey Golu."
+```
+
+With that, **all 7 test pronunciations transcribe as literally "Golu"**, and
+the small fast model becomes as accurate as the larger one — 740 ms instead
+of 1490 ms per phrase. This is also why renaming the robot works: the prompt
+is built from `WAKE_WORD`.
+
+A short list of misspellings is still accepted as a fallback. `hello` and
+`gala` are deliberately excluded: a missed wake is much better than a robot
+that reacts to ordinary conversation.
+
+### Repetition loops
+
+Whisper sometimes degenerates and emits one phrase over and over — a real
+capture here produced "Good luck." seventy-five times. Those transcripts are
+detected and discarded, so the robot does not apologise at noise. Utterances
+longer than 10 words with no wake word are also ignored in silence, because
+they are somebody talking, not somebody giving an order.
 
 ## Barge-in — what is and isn't real
 
@@ -205,7 +238,7 @@ stays near 0.00005 the mic is muted in Windows — there is often a dedicated
 mic-mute key with an LED. That is not a code problem.
 
 **It hears me but ignores me.** Run `main.py --debug-audio` to see every
-transcript. If Whisper writes something other than "Milo", add that spelling
+transcript. If Whisper writes something other than "Golu", add that spelling
 to `WAKE_VARIANTS` in `commands.py`. If it mishears the command, try
 `--whisper-model base.en`.
 

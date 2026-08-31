@@ -79,8 +79,8 @@ def main():
     failures = 0
 
     # 1. name + command in one breath
-    fired, said = run_script([("Milo follow me", 0)])
-    failures += check("'Milo follow me' -> FOLLOW", fired, [FOLLOW])
+    fired, said = run_script([("Golu follow me", 0)])
+    failures += check("'Golu follow me' -> FOLLOW", fired, [FOLLOW])
     failures += check("  ...and it replies", said, ["Okay, following you."])
 
     # 2. the big one: a command with no wake word must be ignored
@@ -94,18 +94,26 @@ def main():
     failures += check("unrelated conversation -> ignored", fired, [])
 
     # 4. name alone, then the command
-    fired, said = run_script([("Milo", 0), ("stop", 0)])
-    failures += check("'Milo' then 'stop' -> STOP", fired, [STOP])
+    fired, said = run_script([("Golu", 0), ("stop", 0)])
+    failures += check("'Golu' then 'stop' -> STOP", fired, [STOP])
     failures += check("  ...acknowledges the name first",
                       said, ["Yes?", "Stopping."])
 
     # 5. the awake window expires
-    fired, _ = run_script([("Milo", 0), ("follow me", 0.6)], awake_seconds=0.3)
+    fired, _ = run_script([("Golu", 0), ("follow me", 0.6)], awake_seconds=0.3)
     failures += check("command after the awake window expired -> ignored",
                       fired, [])
 
-    # 6. wake word heard but the command is not understood -> stays awake
-    fired, said = run_script([("Milo what is the weather", 0),
+    # 6. while awake, a long overheard sentence is ignored in silence
+    fired, said = run_script([
+        ("Golu", 0),
+        ("so anyway I told him that the whole project would slip by a week", 0),
+    ])
+    failures += check("long overheard sentence while awake -> no apology",
+                      said, ["Yes?"])
+
+    # 7. wake word heard but the command is not understood -> stays awake
+    fired, said = run_script([("Golu what is the weather", 0),
                               ("follow me", 0)])
     failures += check("unclear command keeps it awake for a retry",
                       fired, [FOLLOW])

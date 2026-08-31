@@ -69,8 +69,10 @@ def parse_args():
                    help="force a backend. Default: sarvam if both API keys are "
                         "set, otherwise the offline English one.")
     p.add_argument("--whisper-model", default="tiny.en",
-                   help="offline model size: tiny.en is fastest, base.en is "
-                        "more accurate")
+                   help="offline model size. tiny.en (740ms) matches base.en "
+                        "(1490ms) for accuracy here once the wake word is fed "
+                        "to Whisper as an initial_prompt, so it is the default. "
+                        "Try base.en if it mishears your commands.")
     # The two below are for testing / running without a desktop session.
     p.add_argument("--seconds", type=float, default=None,
                    help="quit automatically after this many seconds")
