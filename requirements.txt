@@ -1,0 +1,21 @@
+# companion_v0 dependencies
+# Tested on Windows 11 with Python 3.14.4 (works on 3.11+ too).
+# Everything here runs locally on the CPU. No cloud APIs, no paid services.
+
+# Webcam capture and the preview window.
+opencv-python==5.0.0.93
+
+# Pretrained YOLO11 person detector. Pulls in torch + torchvision.
+# On Windows this installs the CPU build of torch - no CUDA download.
+ultralytics==8.4.136
+
+# Local speech-to-text (Whisper, via CTranslate2). Chosen over openai-whisper
+# because it is much faster on CPU and it has wheels for Python 3.14.
+faster-whisper==1.2.1
+
+# Microphone capture. Bundles PortAudio, so unlike PyAudio it needs no
+# compiler and no separate install on Windows.
+sounddevice==0.5.6
+
+# Text-to-speech through the built-in Windows SAPI5 voices. Fully offline.
+pyttsx3==2.99
