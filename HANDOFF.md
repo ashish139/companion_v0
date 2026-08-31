@@ -52,7 +52,7 @@ Check whether the code actually supports each.
 | State machine correct | `python behavior.py` → 8/8 |
 | Vision → action correct | `python selftest_pipeline.py` → 4/4 |
 | Live detection | 99/99 frames on a live webcam, ~16 fps |
-| Command matching | `python test_commands.py` → 46/46 |
+| Command matching | `python test_commands.py` → 47/47 |
 | Full local speech chain | `python test_local_voice.py` → 14/14 |
 | Wake word recognised | `python test_wake_variants.py` → 7/7 pronunciations |
 | Conversation rules | `python test_voice_flow.py` → 10/10 |
