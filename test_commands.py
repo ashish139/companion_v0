@@ -16,7 +16,9 @@ CASES = [
     ("follow me",                       FOLLOW),
     ("Follow me.",                      FOLLOW),
     ("okay follow me now",              FOLLOW),
-    ("milo, follow me please",          FOLLOW),
+    ("golu, follow me please",          FOLLOW),
+    ("golu golu stop",                  STOP),
+    ("stop it",                         STOP),
     ("start following me",              FOLLOW),
     ("come with me",                    FOLLOW),
     ("stop",                            STOP),
@@ -41,7 +43,7 @@ CASES = [
     ("mera peecha karo",                FOLLOW),
     ("ruko",                            STOP),
     ("ruk jao",                         STOP),
-    ("milo ruk jao",                    STOP),
+    ("golu ruk jao",                    STOP),
 
     # --- must NOT fire: the whole point of this module ---
     ("I follow football.",              None),
@@ -50,6 +52,8 @@ CASES = [
     ("I will follow up tomorrow",       None),
     ("the bus stop is around the corner", None),
     ("can you stop the music",          None),
+    ("I had to stop it yesterday",      None),
+    ("it is time to go",                None),
     ("she asked me to follow her",      None),
     ("मैं फुटबॉल फॉलो करता हूँ",           None),
     ("बस स्टॉप कहाँ है",                  None),

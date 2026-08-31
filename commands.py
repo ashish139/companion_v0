@@ -36,8 +36,8 @@ import config
 # Keep this SHORT. Every word added here widens what counts as a command.
 FILLER = {
     # English politeness and address
-    "please", "now", "ok", "okay", "just", "hey", "robot", "milo", "yes",
-    "right", "go", "ahead", "then", "come", "on",
+    "please", "now", "ok", "okay", "just", "hey", "robot", "yes",
+    "right", "go", "ahead", "then", "come", "on", "it",
     # Hinglish / Hindi politeness
     "zara", "zara", "abhi", "bhai", "yaar", "theek", "hai", "acha", "accha",
     # Devanagari politeness
@@ -241,6 +241,12 @@ def _build_wake_variants():
 
 
 WAKE_VARIANTS = _build_wake_variants()
+
+# The robot's own name counts as filler inside a command. Without this,
+# saying it twice - "Golu, Golu stop", which people do when the first one is
+# ignored - leaves a stray "golu" behind and the command is rejected.
+for _variant in WAKE_VARIANTS:
+    _FILLER_TOKENS.update(normalise(_variant))
 
 
 def split_wake_word(text):
