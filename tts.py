@@ -3,136 +3,273 @@ tts.py
 ------
 Speaking out loud, without freezing the video loop.
 
-pyttsx3's engine.runAndWait() blocks until the sentence has finished playing.
-If we called that from the webcam loop the picture would visibly freeze for a
-second every time the robot talks. So instead:
+    say("Stopping.")  ->  [queue]  ->  worker thread  ->  speaker
 
-    main loop  ->  say("Stopping.")  ->  [queue]  ->  worker thread  ->  speaker
+Primary voice is Sarvam's streaming TTS (`bulbul`), which speaks Hindi and
+Indian English properly. Audio is played as it arrives rather than after the
+whole clip is generated, so the robot starts talking sooner.
 
-The worker thread also owns the engine object. That matters on Windows,
-because the SAPI5 voice is a COM object and COM objects must be created and
-used on the same thread.
+pyttsx3 (the built-in Windows voice) stays as an offline fallback for when
+there is no API key or no network. It cannot speak Hindi well, but it is
+better than silence.
+
+The public interface is unchanged from the original version, so the rest of
+the app did not have to be rewritten:
+
+    start()          begin the worker thread
+    say(text)        queue something to speak, returns immediately
+    is_speaking()    True while audio is playing (used to mute the mic)
+    interrupt()      stop mid-sentence, for barge-in
+    shutdown()
 """
 
+import asyncio
+import base64
 import queue
 import threading
 import time
 
+import numpy as np
+
+import config
+
 _say_queue = queue.Queue()
 _worker = None
 _stop_flag = threading.Event()
-
-# True while a sentence is actually playing. main.py uses this to mute the
-# microphone so the robot doesn't hear itself say "Stopping." and react to it.
 _speaking = threading.Event()
-
-# Small grace period after speaking, to let the room echo die down.
+_interrupt = threading.Event()
 _quiet_until = 0.0
-
 _TAIL_SECONDS = 0.4
 
+# Sample rate we ask Sarvam for. 22050 is its default and sounds fine.
+_TTS_RATE = 22050
 
-def _run(rate, voice_hint):
-    """The worker thread: create the engine once, then drain the queue forever."""
-    global _quiet_until
+_sarvam_ok = None      # None = untried, True/False once we know
+_last_error = None
 
-    # comtypes/SAPI5 wants COM initialised on whichever thread uses it.
-    # On some machines pyttsx3 does this itself, so failure here is harmless.
+
+def last_error():
+    return _last_error
+
+
+# --------------------------------------------------------------------------
+# Sarvam streaming voice
+# --------------------------------------------------------------------------
+
+async def _speak_sarvam(text, language_code):
+    """Stream audio from Sarvam and play it as the chunks arrive."""
+    global _last_error
+    import sounddevice as sd
+    from sarvamai import AsyncSarvamAI
+
+    client = AsyncSarvamAI(api_subscription_key=config.SARVAM_API_KEY)
+
+    stream = sd.OutputStream(samplerate=_TTS_RATE, channels=1, dtype="int16")
+    stream.start()
+    played_anything = False
+
+    try:
+        async with client.text_to_speech_streaming.connect(
+                model=config.TTS_MODEL, send_completion_event="true") as ws:
+
+            await ws.configure(
+                target_language_code=language_code,
+                speaker=config.TTS_SPEAKER,
+                output_audio_codec="linear16",   # raw PCM, no decoder needed
+                speech_sample_rate=_TTS_RATE,
+            )
+            await ws.convert(text)
+            await ws.flush()
+
+            while True:
+                # Barge-in: drop everything and stop talking immediately.
+                if _interrupt.is_set():
+                    break
+
+                message = await ws.recv()
+                kind = getattr(message, "type", None)
+
+                if kind == "audio":
+                    raw = base64.b64decode(message.data.audio)
+                    if raw:
+                        samples = np.frombuffer(raw, dtype="<i2")
+                        # write() blocks while the speaker drains, so run it
+                        # off the event loop.
+                        await asyncio.to_thread(stream.write, samples)
+                        played_anything = True
+
+                elif kind == "event":
+                    break        # completion event - the sentence is done
+
+                elif kind == "error":
+                    _last_error = str(getattr(message.data, "message", message.data))
+                    break
+    finally:
+        try:
+            stream.stop()
+            stream.close()
+        except Exception:
+            pass
+
+    return played_anything
+
+
+def _try_sarvam(text, language_code):
+    """Returns True if Sarvam actually spoke."""
+    global _last_error, _sarvam_ok
+    if not config.SARVAM_API_KEY:
+        _last_error = "SARVAM_API_KEY is not set"
+        _sarvam_ok = False
+        return False
+    try:
+        spoke = asyncio.run(_speak_sarvam(text, language_code))
+        if spoke:
+            _sarvam_ok = True
+        return spoke
+    except Exception as exc:
+        _last_error = f"{type(exc).__name__}: {exc}"
+        if _sarvam_ok is not False:
+            print(f"[tts] Sarvam voice failed ({_last_error}).")
+            print("[tts] Falling back to the offline Windows voice.")
+        _sarvam_ok = False
+        return False
+
+
+# --------------------------------------------------------------------------
+# Offline fallback voice
+# --------------------------------------------------------------------------
+
+def _make_offline_engine():
     try:
         import pythoncom
         pythoncom.CoInitialize()
     except Exception:
         pass
-
     try:
         import pyttsx3
         engine = pyttsx3.init()
+        engine.setProperty("rate", 175)
+        return engine
     except Exception as exc:
-        print(f"[tts] Could not start the speech engine ({exc}).")
-        print("[tts] Falling back to printing what the robot would say.")
-        engine = None
+        print(f"[tts] Offline voice unavailable too: {exc}")
+        return None
 
-    if engine is not None:
-        if rate is not None:
-            engine.setProperty("rate", rate)
-        if voice_hint:
-            # Pick the first installed voice whose name contains the hint,
-            # e.g. --voice zira. If nothing matches we keep the default voice.
-            for v in engine.getProperty("voices"):
-                if voice_hint.lower() in v.name.lower():
-                    engine.setProperty("voice", v.id)
-                    break
+
+# --------------------------------------------------------------------------
+# Worker
+# --------------------------------------------------------------------------
+
+def _run():
+    global _quiet_until
+
+    offline = None          # created lazily, only if we actually need it
 
     while not _stop_flag.is_set():
         try:
-            text = _say_queue.get(timeout=0.2)
+            item = _say_queue.get(timeout=0.2)
         except queue.Empty:
             continue
-
-        if text is None:  # shutdown sentinel
+        if item is None:
             break
 
+        text, language_code = item
+        _interrupt.clear()
         _speaking.set()
         try:
-            if engine is None:
-                print(f"[robot says] {text}")
-                time.sleep(0.6)  # pretend it took a moment, so muting still works
-            else:
-                engine.say(text)
-                engine.runAndWait()
+            spoke = _try_sarvam(text, language_code)
+            if not spoke and not _interrupt.is_set():
+                if offline is None:
+                    offline = _make_offline_engine()
+                if offline is not None:
+                    offline.say(text)
+                    offline.runAndWait()
+                else:
+                    print(f"[robot would say] {text}")
+                    time.sleep(0.5)
         except Exception as exc:
             print(f"[tts] Failed to speak {text!r}: {exc}")
         finally:
             _quiet_until = time.time() + _TAIL_SECONDS
             _speaking.clear()
 
-    if engine is not None:
+    if offline is not None:
         try:
-            engine.stop()
+            offline.stop()
         except Exception:
             pass
 
 
-def start(rate=175, voice_hint=None):
-    """Start the speaking thread. Safe to call once at startup."""
+def start(rate=None, voice_hint=None):
+    """
+    Start the speaking thread.
+
+    rate and voice_hint are accepted for backwards compatibility with the
+    original pyttsx3-only version; Sarvam uses config.TTS_SPEAKER instead.
+    """
     global _worker
     if _worker is not None:
         return
     _stop_flag.clear()
-    _worker = threading.Thread(target=_run, args=(rate, voice_hint),
-                               name="tts", daemon=True)
+    _worker = threading.Thread(target=_run, name="tts", daemon=True)
     _worker.start()
 
 
-def say(text):
-    """Queue a sentence. Returns immediately - it does not wait for the audio."""
-    if text:
-        _say_queue.put(text)
+def say(text, language_code=None):
+    """Queue a sentence. Returns immediately; it does not wait for audio."""
+    if not text:
+        return
+    if language_code is None:
+        # Pick Hindi if the text is Devanagari, otherwise Indian English.
+        language_code = ("hi-IN" if any("ऀ" <= ch <= "ॿ" for ch in text)
+                         else "en-IN")
+    _say_queue.put((text, language_code))
+
+
+# Alias, because the spec asks for speak().
+speak = say
 
 
 def is_speaking():
-    """True while audio is playing (plus a short tail). Used to mute the mic."""
+    """True while audio is playing, plus a short tail for the room echo."""
     return _speaking.is_set() or time.time() < _quiet_until
 
 
+def interrupt():
+    """
+    Stop talking right now and drop anything queued.
+
+    This is what makes barge-in work: when the wake word is heard while the
+    robot is mid-sentence, we cut the audio and start listening.
+    """
+    _interrupt.set()
+    while True:
+        try:
+            _say_queue.get_nowait()
+        except queue.Empty:
+            break
+
+
 def shutdown():
-    """Ask the worker thread to finish and wait briefly for it."""
     global _worker
     if _worker is None:
         return
+    _interrupt.set()
     _stop_flag.set()
     _say_queue.put(None)
-    _worker.join(timeout=3.0)
+    _worker.join(timeout=5.0)
     _worker = None
 
 
-# Quick check that your speakers work:  python tts.py
+# Quick check:  python tts.py
 if __name__ == "__main__":
     start()
-    say("Okay, following you.")
-    say("Stopping.")
+    print("Sarvam key:", "set" if config.SARVAM_API_KEY else "MISSING (will use offline voice)")
+    say("Okay, following you.", "en-IN")
+    say("ठीक है, मैं आपके साथ चल रहा हूँ।", "hi-IN")
+    say("Stopping.", "en-IN")
     while is_speaking() or not _say_queue.empty():
         time.sleep(0.1)
-    time.sleep(0.3)
+    time.sleep(0.5)
     shutdown()
+    print("last error:", last_error())
     print("done")

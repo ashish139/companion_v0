@@ -1,7 +1,8 @@
 # companion_v0 dependencies
 # Tested on Windows 11 with Python 3.14.4 (works on 3.11+ too).
-# Everything here runs locally on the CPU. No cloud APIs, no paid services.
+# All have cp314 wheels.
 
+# --- vision (unchanged) -----------------------------------------------------
 # Webcam capture and the preview window.
 opencv-python==5.0.0.93
 
@@ -9,13 +10,30 @@ opencv-python==5.0.0.93
 # On Windows this installs the CPU build of torch - no CUDA download.
 ultralytics==8.4.136
 
-# Local speech-to-text (Whisper, via CTranslate2). Chosen over openai-whisper
-# because it is much faster on CPU and it has wheels for Python 3.14.
-faster-whisper==1.2.1
-
-# Microphone capture. Bundles PortAudio, so unlike PyAudio it needs no
-# compiler and no separate install on Windows.
+# --- audio ------------------------------------------------------------------
+# Microphone capture and speaker playback. Bundles PortAudio, so unlike
+# PyAudio it needs no compiler on Windows.
 sounddevice==0.5.6
 
-# Text-to-speech through the built-in Windows SAPI5 voices. Fully offline.
+# --- voice ------------------------------------------------------------------
+# Local wake-word detection ("Milo"). Runs on-device, needs a free
+# AccessKey from https://console.picovoice.ai
+pvporcupine==4.0.3
+
+# Sarvam: realtime speech-to-text (saaras:v3-realtime) and streaming
+# text-to-speech (bulbul). Handles Hindi, Indian English and Hinglish.
+# Needs SARVAM_API_KEY. Brings in websockets + pydantic.
+sarvamai==0.1.31
+
+# Reads the .env file so keys never live in the source.
+python-dotenv==1.2.3
+
+# Offline fallback voice, using the built-in Windows SAPI5 voices.
+# Used only when Sarvam is unavailable. Poor at Hindi.
 pyttsx3==2.99
+
+# --- optional ---------------------------------------------------------------
+# Only needed by speech.py, the legacy offline recogniser that main.py no
+# longer uses. Safe to remove along with speech.py if you want a lighter
+# install - it pulls in ctranslate2, onnxruntime and av.
+faster-whisper==1.2.1

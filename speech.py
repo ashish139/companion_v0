@@ -1,6 +1,21 @@
 """
 speech.py
 ---------
+LEGACY - no longer used by main.py.
+
+This was the original voice input: a hand-tuned loudness threshold feeding
+clips to a local Whisper model. It has been replaced by the wake-word +
+Sarvam pipeline (wakeword.py -> stt.py, orchestrated by voice.py), because
+the threshold approach was fragile in a noisy room and could not handle
+Hindi or Hinglish.
+
+It is kept because it is the only fully offline speech recogniser here, and
+it still runs standalone (`python speech.py`) if you want to compare. Nothing
+imports it. Delete it if you would rather not carry the faster-whisper
+dependency.
+
+Original description follows.
+
 Microphone -> local Whisper -> "follow me" / "stop"
 
 This runs on its own thread so the webcam loop never waits for it:

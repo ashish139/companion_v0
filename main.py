@@ -3,10 +3,14 @@ main.py
 -------
 Companion robot brain, v0 - laptop prototype.
 
-    webcam ---> vision.py  ---> person? LEFT/CENTER/RIGHT --.
-                                                             >--> behavior.py --> action
-    mic    ---> speech.py  ---> "follow me" / "stop" -------'          |
-                                                                       '--> tts.py --> speaker
+    webcam ---> vision.py ---> person? LEFT/CENTER/RIGHT --.
+                                                            >--> behavior.py --> action
+    mic ---> wakeword ---> stt ---> commands --------------'          |
+             ("Milo")     (Sarvam)  (follow/stop)                     '--> tts.py --> speaker
+
+The camera loop below never waits for the microphone, the network or the
+speaker. All of that lives on other threads (see voice.py) and reaches this
+loop through a callback and a state label.
 
 Run it:
     python main.py
@@ -18,15 +22,21 @@ Keys (click the video window first):
 """
 
 import argparse
+import queue
 import sys
 import time
 
 import cv2
 
+import audio_in
 import behavior
-import speech
+import commands
+import config
+import stt
 import tts
 import vision
+import voice
+import wakeword
 
 
 def parse_args():
@@ -37,10 +47,6 @@ def parse_args():
                    help="microphone device index; default = Windows default mic")
     p.add_argument("--model", default="yolo11n.pt",
                    help="YOLO weights; nano is the fastest")
-    p.add_argument("--whisper-model", default="tiny.en",
-                   help="faster-whisper size. Measured here: tiny.en ~0.9s per phrase, "
-                        "base.en ~1.7s. Both got 6/6 on our test phrases, so tiny.en "
-                        "is the default. Use base.en if it mishears you.")
     p.add_argument("--conf", type=float, default=0.4,
                    help="detection confidence threshold")
     p.add_argument("--imgsz", type=int, default=480,
@@ -57,13 +63,8 @@ def parse_args():
                    help="skip the microphone entirely and use the f / s keys")
     p.add_argument("--no-mirror", action="store_true",
                    help="show the raw camera view instead of mirroring it")
-    p.add_argument("--voice", default=None,
-                   help="pick a Windows voice by name, e.g. --voice zira")
-    p.add_argument("--rate", type=int, default=175, help="speech rate")
     p.add_argument("--debug-audio", action="store_true",
-                   help="print every transcript Whisper produces, plus a mic level meter")
-    p.add_argument("--mic-threshold", type=float, default=None,
-                   help="override the loudness threshold for 'someone is talking'")
+                   help="print wake-word hits and partial transcripts")
     # The two below are for testing / running without a desktop session.
     p.add_argument("--seconds", type=float, default=None,
                    help="quit automatically after this many seconds")
@@ -72,13 +73,25 @@ def parse_args():
     return p.parse_args()
 
 
-def print_status(state, position, action, last_command):
-    """Print the live status block. Called only when something actually changed."""
-    print(f"STATE:  {state}")
-    print(f"PERSON: {position if position else 'NO PERSON'}")
-    print(f"ACTION: {action}")
-    print(f"HEARD:  {last_command if last_command else '-'}")
-    print("-" * 34, flush=True)
+# Recognised commands are handed from the voice thread to the camera loop
+# through this queue. A queue rather than a shared variable so nothing is
+# ever lost or half-written between threads.
+_voice_commands = queue.Queue()
+
+
+def print_status(robot_state, voice_state, position, action, last_heard):
+    """
+    Print the live status block.
+
+    Only called when something actually changed, otherwise this would scroll
+    past 16 times a second and be unreadable.
+    """
+    print(f"ROBOT STATE : {robot_state}")
+    print(f"VOICE STATE : {voice_state}")
+    print(f"PERSON      : {position if position else 'NO PERSON'}")
+    print(f"ACTION      : {action}")
+    print(f"LAST HEARD  : {last_heard if last_heard else '-'}")
+    print("-" * 46, flush=True)
 
 
 def main():
@@ -128,32 +141,51 @@ def main():
         return 1
 
     # --- speaker --------------------------------------------------------
-    tts.start(rate=args.rate, voice_hint=args.voice)
+    tts.start()
 
-    # --- microphone -----------------------------------------------------
-    voice_on = not args.no_voice
-    if voice_on:
-        # is_muted=tts.is_speaking stops the mic hearing the robot's own voice.
-        speech.start(model_size=args.whisper_model, device_index=args.mic,
-                     is_muted=tts.is_speaking, debug=args.debug_audio,
-                     threshold=args.mic_threshold)
-        if not speech.wait_until_ready():
-            print("[main] Voice input unavailable - carrying on with the f / s keys.")
-            voice_on = False
+    # --- voice: microphone, wake word, speech recognition ----------------
+    # Each stage degrades on its own. A missing key or a muted mic disables
+    # voice but must never stop the camera loop or the f / s keys.
+    voice_on = False
+    if not args.no_voice:
+        for line in config.describe():
+            print(f"[cfg]  {line}")
+
+        mic_ok = audio_in.start(device=args.mic if args.mic is not None
+                                else config.MIC_DEVICE,
+                                blocksize=512)
+        if not mic_ok:
+            print("[main] Microphone unavailable - carrying on with the f / s keys.")
+        else:
+            if wakeword.init():
+                # Porcupine may want a different frame size than our guess.
+                if wakeword.frame_length() != 512:
+                    audio_in.stop()
+                    audio_in.start(device=args.mic, blocksize=wakeword.frame_length())
+                voice_on = voice.start(
+                    on_command=lambda c, t: _voice_commands.put((c, t)))
+        if not voice_on:
+            print("[main] Voice control is off. The f / s keys still work.")
     else:
-        print("[main] Voice input disabled (--no-voice). Use the f / s keys.")
+        print("[main] Voice disabled (--no-voice). Use the f / s keys.")
 
+    wake_name = wakeword.active_name() or config.WAKE_WORD
     print()
-    print("=" * 34)
-    print(" Say 'follow me' or 'stop'." if voice_on else " Press f = follow me, s = stop.")
+    print("=" * 46)
+    if voice_on:
+        print(f" Say '{wake_name}', then 'follow me' / 'stop'")
+        print(f" or in Hindi: 'मेरे साथ चलो' / 'रुको'")
+    else:
+        print(" Press f = follow me, s = stop.")
     print(" Press q in the video window to quit.")
-    print("=" * 34)
+    print("=" * 46)
     print()
 
     # --- state ----------------------------------------------------------
     state = behavior.IDLE
     action = behavior.STOP
     last_command = None
+    last_heard = None
     last_printed = None          # so we only print when something changes
     last_box = None              # last good detection, for the flicker hold
     last_box_time = 0.0
@@ -184,27 +216,29 @@ def main():
             frame_index += 1
 
             # --- 1. vision: where is the person? ---
+            frame_time = time.time()
             if frame_index % args.detect_every == 0:
-                box = vision.detect_person(model, frame, conf=args.conf, imgsz=args.imgsz)
-                if box is not None:
-                    last_box, last_box_time = box, time.time()
-            else:
-                box = last_box
+                detected = vision.detect_person(model, frame, conf=args.conf,
+                                                imgsz=args.imgsz)
+                if detected is not None:
+                    last_box, last_box_time = detected, frame_time
 
-            # Detection flickers off for a frame or two even when you haven't
-            # moved. Reuse the last box briefly so the action doesn't stutter
-            # between FORWARD and STOP.
-            if box is None and time.time() - last_box_time < args.hold:
-                box = last_box
+            # One rule, applied on every frame - detector frames and skipped
+            # frames alike: only use the stored box while it is still fresh.
+            # See vision.fresh_box for why this is centralised.
+            box = vision.fresh_box(last_box, last_box_time, frame_time, args.hold)
 
             position = vision.classify_position(box, width, args.center_band)
 
-            # --- 2. hearing: did a command arrive? ---
+            # --- 2. hearing: did the voice thread recognise a command? ---
+            # Non-blocking: if nothing is waiting we carry straight on.
             command = None
-            if voice_on:
-                command, _raw_text = speech.get_command()
-                if command:
-                    last_command = command
+            from_keyboard = False
+            try:
+                command, heard_text = _voice_commands.get_nowait()
+                last_command, last_heard = command, heard_text
+            except queue.Empty:
+                pass
 
             # --- 3. keyboard shortcuts (also the quit key) ---
             # waitKey only works while a window exists, so skip it in --no-window.
@@ -212,24 +246,26 @@ def main():
             if key == ord("q"):
                 break
             elif key == ord("f"):
-                command = behavior.CMD_FOLLOW_ME
-                last_command = command + " (key)"
+                command, from_keyboard = behavior.CMD_FOLLOW_ME, True
+                last_command, last_heard = command, "follow me (key)"
             elif key == ord("s"):
-                command = behavior.CMD_STOP
-                last_command = command + " (key)"
+                command, from_keyboard = behavior.CMD_STOP, True
+                last_command, last_heard = command, "stop (key)"
 
             # --- 4. brain: decide state + action ---
             state, action, say_text = behavior.decide(state, command, position)
 
-            # say_text is only non-None on the frame a command was accepted,
-            # which is what keeps the robot from talking on every frame.
-            if say_text:
+            # Only speak here for keyboard commands. When the command came by
+            # voice, voice.py has already spoken the reply - and it picks
+            # Hindi or English to match what you said, which this cannot.
+            if say_text and from_keyboard:
                 tts.say(say_text)
 
             # --- 5. terminal output, only when something changed ---
-            snapshot = (state, position, action, last_command)
+            voice_state = voice.state() if voice_on else "OFF"
+            snapshot = (state, voice_state, position, action, last_heard)
             if snapshot != last_printed:
-                print_status(state, position, action, last_command)
+                print_status(state, voice_state, position, action, last_heard)
                 last_printed = snapshot
 
             # --- 6. the video window ---
@@ -239,8 +275,13 @@ def main():
             fps_smoothed = fps if fps_smoothed == 0 else 0.9 * fps_smoothed + 0.1 * fps
 
             if not args.no_window:
+                # The overlay only renders ASCII, so pass the command name
+                # rather than a Hindi transcript, which OpenCV cannot draw.
                 vision.draw_overlay(frame, box, position, state, action,
                                     last_command, args.center_band)
+                cv2.putText(frame, f"VOICE: {voice_state}",
+                            (10, height - 56), cv2.FONT_HERSHEY_SIMPLEX, 0.5,
+                            (0, 220, 220), 1, cv2.LINE_AA)
                 cv2.putText(frame, f"{fps_smoothed:4.1f} fps  |  q=quit  f=follow  s=stop",
                             (10, height - 34), cv2.FONT_HERSHEY_SIMPLEX, 0.45,
                             (200, 200, 200), 1, cv2.LINE_AA)
@@ -260,11 +301,18 @@ def main():
     finally:
         # Always release the hardware, even after an error, or the camera
         # stays locked and the next run fails to open it.
-        cap.release()
-        cv2.destroyAllWindows()
-        if voice_on:
-            speech.stop()
-        tts.shutdown()
+        # Shut down in the reverse order things were started, and never let
+        # one failure stop the rest from being cleaned up.
+        for label, fn in (("camera", cap.release),
+                          ("windows", cv2.destroyAllWindows),
+                          ("voice", voice.stop),
+                          ("wake word", wakeword.shutdown),
+                          ("microphone", audio_in.stop),
+                          ("speaker", tts.shutdown)):
+            try:
+                fn()
+            except Exception as exc:
+                print(f"[main] problem shutting down {label}: {exc}")
         print("[main] Bye.")
 
     return 0

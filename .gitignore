@@ -3,3 +3,8 @@ __pycache__/
 *.pt
 bus.jpg
 *.log
+camera_check.png
+
+# secrets - never commit
+.env
+*.ppn

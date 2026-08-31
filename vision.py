@@ -48,6 +48,28 @@ def open_camera(index=0, width=640, height=480):
     return cap
 
 
+def fresh_box(last_box, last_seen_time, now, hold):
+    """
+    Return the stored box only if it is still recent enough to trust.
+
+    Detection flickers off for a frame or two even when you haven't moved, so
+    we briefly reuse the last known box. But it must expire.
+
+    This exists as its own function because the old code applied the age check
+    in only one of the two code paths: on frames where the detector was
+    skipped (--detect-every > 1) it reused `last_box` unconditionally, which
+    could resurrect a person position from long after `--hold` had passed.
+    Routing every path through here makes that impossible.
+
+        used  <=>  last_box is not None and (now - last_seen_time) <= hold
+    """
+    if last_box is None:
+        return None
+    if now - last_seen_time <= hold:
+        return last_box
+    return None
+
+
 def looks_blocked(frame):
     """
     True if the frame looks like a privacy placeholder rather than a real view.
