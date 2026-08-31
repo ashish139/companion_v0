@@ -7,21 +7,24 @@ The conversation loop, on its own thread.
         ▲                                                     │
         └──────────── reply finishes ◄──── SPEAKING ◄─────────┘
 
-The camera loop in main.py never waits for any of this. It just asks
+The camera loop in main.py never waits for any of this. It reads
 voice.state() for a label to print, and gets a callback when a command is
 recognised.
 
-Two things worth understanding:
+There are two backends, chosen automatically at startup:
 
-Barge-in. The wake-word detector is deliberately left running while the robot
-is speaking. Saying "Milo" mid-sentence cuts the audio and starts listening
-again. This works precisely because the robot never says its own name, so it
-cannot interrupt itself. Interrupting on *any* speech would need acoustic echo
-cancellation, which we do not have - see the README.
+  LOCAL   (no keys needed, English only)
+          Everything runs on this laptop. Silero VAD finds your speech,
+          Whisper transcribes it, and the robot's name is spotted in the
+          transcript. Because the name and the command arrive in the same
+          transcript, you can say "Milo, follow me" in one breath.
 
-Self-triggering. The speech recogniser is only fed audio in the LISTENING
-state. While the robot is talking, nothing is being transcribed, so the robot
-cannot hear its own reply and treat it as a command.
+  SARVAM  (needs PICOVOICE_ACCESS_KEY and SARVAM_API_KEY)
+          Porcupine listens for the name on-device, then Sarvam's realtime
+          API transcribes. Adds Hindi and Hinglish, and supports barge-in.
+
+Self-triggering is prevented in both: the microphone capture is disarmed
+while the robot is speaking, so it can never transcribe its own voice.
 """
 
 import threading
@@ -30,6 +33,7 @@ import time
 import audio_in
 import commands
 import config
+import local_stt
 import stt
 import tts
 import wakeword
@@ -39,20 +43,20 @@ LISTENING = "LISTENING"
 PROCESSING = "PROCESSING"
 SPEAKING = "SPEAKING"
 
+# How long the robot stays awake waiting for a command after just its name.
+AWAKE_SECONDS = 8.0
+
 _state = SLEEPING
 _state_lock = threading.Lock()
 _last_heard = None
-_last_partial = None
 
 _wake_event = threading.Event()
 _stop_flag = threading.Event()
 _thread = None
 _on_command = None
-_enabled = False
+_backend = None
 
-# What the robot says when it heard words but none of them were a command.
-_NOT_UNDERSTOOD_EN = "Sorry, I didn't catch that."
-_NOT_UNDERSTOOD_HI = "माफ़ कीजिए, समझ नहीं आया।"
+_NOT_UNDERSTOOD = "Sorry, I didn't catch that."
 
 
 def state():
@@ -60,12 +64,12 @@ def state():
         return _state
 
 
+def backend():
+    return _backend
+
+
 def last_heard():
     return _last_heard
-
-
-def last_partial():
-    return _last_partial
 
 
 def _set_state(new_state):
@@ -74,106 +78,156 @@ def _set_state(new_state):
         _state = new_state
 
 
+def _speak_and_wait(text, language_code="en-IN"):
+    """
+    Say something, with the microphone deafened for the duration.
+
+    Disarming capture is what stops the robot hearing its own reply and
+    treating it as a command. We drain whatever leaked into the buffer before
+    re-arming, so the next utterance starts clean.
+    """
+    _set_state(SPEAKING)
+    audio_in.disarm_capture()
+    tts.say(text, language_code)
+
+    time.sleep(0.3)                      # let the queue pick it up
+    deadline = time.time() + 25
+    while time.time() < deadline:
+        if _stop_flag.is_set() or _wake_event.is_set():
+            break
+        if not tts.is_speaking():
+            break
+        time.sleep(0.05)
+
+    audio_in.drain_capture()
+    audio_in.arm_capture()
+
+
+def _dispatch(text):
+    """
+    Understand one utterance and reply. Returns True if it was a command.
+
+    Shared by both backends so the behaviour is identical either way.
+    """
+    global _last_heard
+    _last_heard = text
+
+    _set_state(PROCESSING)
+    command = commands.match_command(text)
+
+    if command is not None:
+        if _on_command:
+            _on_command(command, text)
+        _speak_and_wait(commands.reply_for(command, text),
+                        commands.reply_language(text))
+        return True
+
+    _speak_and_wait(_NOT_UNDERSTOOD, commands.reply_language(text))
+    return False
+
+
+# --------------------------------------------------------------------------
+# LOCAL backend - offline, English, no keys
+# --------------------------------------------------------------------------
+
+def _run_local():
+    """
+    Transcribe every utterance locally and act only on ones addressed to us.
+
+    Whisper only runs when Silero VAD says there was actually speech, so this
+    is not "Whisper running continuously" - an idle room costs nothing.
+    """
+    audio_in.arm_capture()
+    awake_until = 0.0
+
+    while not _stop_flag.is_set():
+        awake = time.time() < awake_until
+        _set_state(LISTENING if awake else SLEEPING)
+
+        text = local_stt.next_utterance(timeout=0.5)
+        if text is None:
+            continue
+        if _stop_flag.is_set():
+            break
+
+        heard_name, remainder = commands.split_wake_word(text)
+
+        # Ignore ordinary conversation: unless the robot was called, or is
+        # already awake from a moment ago, nothing said is meant for it.
+        if not heard_name and not (time.time() < awake_until):
+            continue
+
+        spoken = remainder if heard_name else text
+
+        if heard_name and not spoken.strip():
+            # Just the name on its own - acknowledge and wait for the command.
+            _speak_and_wait("Yes?")
+            awake_until = time.time() + AWAKE_SECONDS
+            continue
+
+        acted = _dispatch(spoken)
+        # After a command we go back to sleep; after a misunderstanding we
+        # stay awake briefly so you can simply repeat yourself.
+        awake_until = 0.0 if acted else time.time() + AWAKE_SECONDS
+
+    audio_in.disarm_capture()
+
+
+# --------------------------------------------------------------------------
+# SARVAM backend - wake word on-device, recognition in the cloud
+# --------------------------------------------------------------------------
+
 def _on_wake():
-    """
-    Called from the audio thread the instant the wake word is heard.
-    Must return fast - no network, no blocking.
-    """
+    """Called from the audio thread the instant Porcupine fires. Must be fast."""
     tts.interrupt()          # barge-in: stop mid-sentence if talking
     _wake_event.set()
 
 
-def _handle_one_turn():
-    """Wake word already heard. Listen, understand, reply."""
-    global _last_heard, _last_partial
-
-    # --- LISTENING ---------------------------------------------------
-    _set_state(LISTENING)
-    _last_partial = None
-    audio_in.arm_capture()
-    try:
-        text = stt.listen_once(
-            on_partial=_remember_partial,
-            on_speech_start=None,
-        )
-    finally:
-        audio_in.disarm_capture()
-
-    if text is None:
-        # Timed out, or STT is unavailable. Say nothing and go back to sleep -
-        # chirping every time you walk past would be maddening.
-        err = stt.last_error()
-        if err and "timed out" not in err:
-            print(f"[voice] speech recognition unavailable: {err}")
-        _set_state(SLEEPING)
-        return
-
-    _last_heard = text
-
-    # --- PROCESSING ----------------------------------------------------
-    _set_state(PROCESSING)
-    command = commands.match_command(text)
-
-    if command is not None and _on_command:
-        _on_command(command, text)
-
-    if command is not None:
-        reply = commands.reply_for(command, text)
-    else:
-        reply = (_NOT_UNDERSTOOD_HI
-                 if commands.reply_language(text) == "hi-IN"
-                 else _NOT_UNDERSTOOD_EN)
-
-    # --- SPEAKING ------------------------------------------------------
-    _set_state(SPEAKING)
-    tts.say(reply, commands.reply_language(text))
-
-    # Wait for the reply to finish, but let a new wake word cut it short.
-    deadline = time.time() + 20.0
-    while time.time() < deadline:
-        if _stop_flag.is_set() or _wake_event.is_set():
-            break
-        if tts.is_speaking():
-            time.sleep(0.05)
-            continue
-        # Give the queue a beat to pick the sentence up before deciding
-        # it has finished.
-        time.sleep(0.15)
-        if not tts.is_speaking():
-            break
-
-    _set_state(SLEEPING)
-
-
-def _remember_partial(text):
-    global _last_partial
-    _last_partial = text
-
-
-def _run():
+def _run_sarvam():
     while not _stop_flag.is_set():
         _set_state(SLEEPING)
         if not _wake_event.wait(timeout=0.2):
             continue
         _wake_event.clear()
+
+        _set_state(LISTENING)
+        audio_in.arm_capture()
         try:
-            _handle_one_turn()
-        except Exception as exc:
-            # A failure here must never take the robot down.
-            print(f"[voice] turn failed: {type(exc).__name__}: {exc}")
-            _set_state(SLEEPING)
+            text = stt.listen_once()
+        finally:
+            audio_in.disarm_capture()
+
+        if not text:
+            err = stt.last_error()
+            if err and "timed out" not in err:
+                print(f"[voice] speech recognition unavailable: {err}")
+            continue
+
+        _dispatch(text)
 
 
-def start(on_command):
+def _run():
+    try:
+        if _backend == "local":
+            _run_local()
+        else:
+            _run_sarvam()
+    except Exception as exc:
+        print(f"[voice] voice loop stopped: {type(exc).__name__}: {exc}")
+    finally:
+        _set_state(SLEEPING)
+
+
+# --------------------------------------------------------------------------
+
+def start(on_command, prefer=None, whisper_model="tiny.en", debug=False):
     """
-    Start the voice loop. Returns True if it is actually usable.
+    Start the voice loop. Returns True if it is usable.
 
-    Degrades in stages rather than failing outright:
-      no microphone  -> voice off entirely, keyboard still works
-      no wake word   -> voice off (we refuse to run STT continuously)
-      no Sarvam key  -> wake word still works, but nothing can be understood
+    Picks the Sarvam backend when both keys are present, otherwise falls back
+    to the fully local one. Pass prefer="local" or "sarvam" to force it.
     """
-    global _thread, _on_command, _enabled
+    global _thread, _on_command, _backend
 
     _on_command = on_command
 
@@ -181,26 +235,37 @@ def start(on_command):
         print("[voice] No microphone, so voice control is off.")
         return False
 
-    if not wakeword.is_ready():
-        print("[voice] No wake word, so voice control is off.")
-        print("        (We deliberately do not run speech recognition"
-              " continuously.)")
-        return False
+    can_sarvam = bool(config.PICOVOICE_ACCESS_KEY) and stt.is_configured()
+    choice = prefer or ("sarvam" if can_sarvam else "local")
 
-    if not stt.is_configured():
-        print("[voice] SARVAM_API_KEY is not set: the robot will wake up but")
-        print("        will not be able to understand anything you say.")
+    if choice == "sarvam":
+        if not can_sarvam:
+            print("[voice] Sarvam backend needs both PICOVOICE_ACCESS_KEY and"
+                  " SARVAM_API_KEY.")
+            return False
+        if not wakeword.init():
+            return False
+        wakeword.listen(_on_wake)
+        _backend = "sarvam"
+        print("[voice] Backend: Sarvam (Hindi + English, barge-in enabled).")
+    else:
+        if not local_stt.init(model_size=whisper_model, debug=debug):
+            print("[voice] Local speech recognition unavailable.")
+            return False
+        _backend = "local"
+        print("[voice] Backend: local Whisper (English only, offline).")
+        if not can_sarvam:
+            print("        Add PICOVOICE_ACCESS_KEY and SARVAM_API_KEY to .env"
+                  " for Hindi and barge-in.")
 
-    wakeword.listen(_on_wake)
     _stop_flag.clear()
     _thread = threading.Thread(target=_run, name="voice", daemon=True)
     _thread.start()
-    _enabled = True
     return True
 
 
 def is_enabled():
-    return _enabled
+    return _thread is not None
 
 
 def stop():
@@ -209,5 +274,5 @@ def stop():
         return
     _stop_flag.set()
     _wake_event.set()
-    _thread.join(timeout=3.0)
+    _thread.join(timeout=5.0)
     _thread = None

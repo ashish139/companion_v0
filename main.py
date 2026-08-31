@@ -64,7 +64,13 @@ def parse_args():
     p.add_argument("--no-mirror", action="store_true",
                    help="show the raw camera view instead of mirroring it")
     p.add_argument("--debug-audio", action="store_true",
-                   help="print wake-word hits and partial transcripts")
+                   help="print every transcript, including discarded noise")
+    p.add_argument("--voice-backend", choices=["local", "sarvam"], default=None,
+                   help="force a backend. Default: sarvam if both API keys are "
+                        "set, otherwise the offline English one.")
+    p.add_argument("--whisper-model", default="tiny.en",
+                   help="offline model size: tiny.en is fastest, base.en is "
+                        "more accurate")
     # The two below are for testing / running without a desktop session.
     p.add_argument("--seconds", type=float, default=None,
                    help="quit automatically after this many seconds")
@@ -157,24 +163,28 @@ def main():
         if not mic_ok:
             print("[main] Microphone unavailable - carrying on with the f / s keys.")
         else:
-            if wakeword.init():
-                # Porcupine may want a different frame size than our guess.
-                if wakeword.frame_length() != 512:
-                    audio_in.stop()
-                    audio_in.start(device=args.mic, blocksize=wakeword.frame_length())
-                voice_on = voice.start(
-                    on_command=lambda c, t: _voice_commands.put((c, t)))
+            voice_on = voice.start(
+                on_command=lambda c, t: _voice_commands.put((c, t)),
+                prefer=args.voice_backend,
+                whisper_model=args.whisper_model,
+                debug=args.debug_audio)
         if not voice_on:
             print("[main] Voice control is off. The f / s keys still work.")
     else:
         print("[main] Voice disabled (--no-voice). Use the f / s keys.")
 
-    wake_name = wakeword.active_name() or config.WAKE_WORD
     print()
     print("=" * 46)
-    if voice_on:
+    if voice_on and voice.backend() == "local":
+        # Offline mode spots the name in the transcript, so the name and the
+        # command can arrive in one breath.
+        print(f" Say: \"{config.WAKE_WORD}, follow me\"   or   \"{config.WAKE_WORD}, stop\"")
+        print(f" (or just \"{config.WAKE_WORD}\", wait for 'Yes?', then speak)")
+        print(" English only in this mode.")
+    elif voice_on:
+        wake_name = wakeword.active_name() or config.WAKE_WORD
         print(f" Say '{wake_name}', then 'follow me' / 'stop'")
-        print(f" or in Hindi: 'मेरे साथ चलो' / 'रुको'")
+        print(" or in Hindi: 'mere saath chalo' / 'ruko'")
     else:
         print(" Press f = follow me, s = stop.")
     print(" Press q in the video window to quit.")

@@ -189,6 +189,44 @@ def reply_for(command, heard_text):
     return None
 
 
+# Ways Whisper actually spells the robot's name. It has never heard of
+# "Milo", so it guesses, and these are the guesses worth accepting.
+# Each entry is matched as a whole word (or pair of words), never a substring,
+# so "mile" or "mild" will not wake the robot.
+WAKE_VARIANTS = [
+    "milo", "mylo", "meelo", "milow", "milo's",
+    "my low", "mee lo", "my lo",
+]
+
+
+def split_wake_word(text):
+    """
+    Look for the robot's name and return (heard_it, whatever_else_was_said).
+
+    In offline mode there is no Porcupine, so the name is spotted in the
+    transcript instead. That has one nice side effect: you can say the name
+    and the command in a single breath - "Milo, follow me" - and both are
+    picked up from the same utterance.
+
+        "Milo"              -> (True,  "")
+        "Milo, follow me"   -> (True,  "follow me")
+        "follow me"         -> (False, "follow me")
+    """
+    tokens = normalise(text)
+    if not tokens:
+        return False, ""
+
+    for variant in WAKE_VARIANTS:
+        want = variant.split()
+        found = _find(tokens, want)
+        if found:
+            start, end = found
+            rest = tokens[:start] + tokens[end:]
+            return True, " ".join(rest)
+
+    return False, " ".join(tokens)
+
+
 def reply_language(text):
     """'hi-IN' if the text is Devanagari, else 'en-IN'. Used to pick a voice."""
     return "hi-IN" if any("ऀ" <= ch <= "ॿ" for ch in (text or "")) else "en-IN"

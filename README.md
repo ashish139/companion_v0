@@ -6,12 +6,30 @@ robot: the movement commands are printed instead of driven.
 ```
 webcam ──► YOLO person detector ──► LEFT / CENTER / RIGHT ─┐
                                                            ├─► state machine ──► TURN_LEFT / FORWARD / TURN_RIGHT / STOP
-mic ──► "Milo" ──► Sarvam STT ──► command matching ────────┘         │
-        (local)    (Hindi/English/Hinglish)                          └─► Sarvam TTS ──► speaker
+mic ──► "Milo" ──► speech to text ──► command matching ────┘         │
+                                                                     └─► text to speech ──► speaker
 ```
 
-The vision half runs entirely on your CPU. The voice half is wake-word-gated:
-nothing is sent anywhere until you say the robot's name.
+**It works out of the box with no API keys**, in English, fully offline.
+Adding two keys unlocks Hindi and barge-in.
+
+## Two voice backends
+
+| | LOCAL (default) | SARVAM |
+| --- | --- | --- |
+| API keys needed | none | Picovoice + Sarvam |
+| Network | none, fully offline | yes |
+| Languages | English | English, Hindi, Hinglish |
+| Wake word | name spotted in the transcript | Porcupine, on-device |
+| Barge-in | no | yes |
+| "Milo, follow me" in one breath | yes | no, name first |
+
+The backend is chosen automatically: Sarvam if both keys are present,
+otherwise local. Force one with `--voice-backend local|sarvam`.
+
+In local mode Whisper is **not** running continuously. Silero VAD gates it, so
+an idle room costs nothing — Whisper only runs on audio that is actually
+speech.
 
 ## Status
 
@@ -20,46 +38,20 @@ Tested on Windows 11, Python 3.14, Intel i5-1345U (CPU only).
 | Part | State |
 | --- | --- |
 | Person detection + LEFT/CENTER/RIGHT | **working** — 99/99 frames live, ~16 fps |
-| Robot state machine | **working** — 8/8 cases |
+| Robot state machine | **working** — 8/8 |
 | Stale-box fix (`--detect-every`) | **working** — regression test passes |
-| Command matching EN/HI/Hinglish | **working** — 43/43 including false-positive rejection |
-| Keyboard control + clean exit | **working** — verified with the real window |
-| Graceful degradation with no keys | **working** — verified |
-| Wake word ("Milo") | **untested** — needs a Picovoice AccessKey |
-| Sarvam speech-to-text | **untested** — needs a Sarvam API key |
-| Sarvam text-to-speech | **untested** — needs a Sarvam API key |
-| Offline fallback voice (pyttsx3) | **working** |
+| Command matching | **working** — 43/43, rejects "we should stop for lunch" |
+| Local speech chain (VAD → Whisper → command) | **working** — 10/10 on rendered speech |
+| Live mic → VAD → Whisper | **working** — transcribed real room speech; noise discarded |
+| Wake-word gating against real conversation | **working** — 4 real utterances, 0 false triggers |
+| Conversation flow rules | **working** — 9/9 |
+| Keyboard control + clean exit | **working** |
+| Graceful degradation with no keys | **working** |
+| **Live "Milo, follow me" spoken by a human** | **untested** — needs you to say it |
+| Sarvam STT / TTS, Porcupine, Hindi, barge-in | **untested** — no API keys available |
 
-Nothing that needs an API key has ever been run. Use `selftest_voice.py` to
-check each stage once you have keys.
-
-## Setup
-
-```powershell
-python -m venv .venv; .\.venv\Scripts\python.exe -m pip install -r requirements.txt
-```
-
-Then copy `.env.example` to `.env` and fill in two keys:
-
-| Key | Where from | Free? |
-| --- | --- | --- |
-| `PICOVOICE_ACCESS_KEY` | https://console.picovoice.ai | yes |
-| `SARVAM_API_KEY` | https://dashboard.sarvam.ai | has a free tier |
-
-### Making it actually answer to "Milo"
-
-**"Milo" is not one of Porcupine's built-in wake words.** The built-ins are
-`porcupine`, `bumblebee`, `computer`, `jarvis`, `alexa` and a handful of
-others. Until you train a custom one, the app falls back to `computer` and
-tells you so at startup.
-
-To get the real name:
-
-1. Go to https://console.picovoice.ai → Porcupine
-2. Type `Milo`, pick **Windows (x86_64)**, train (takes seconds), download
-3. Unzip and set `WAKE_WORD_PPN=C:\path\to\Milo_en_windows_v3_0_0.ppn` in `.env`
-
-To rename the robot later, train a new word and change that one line.
+Everything in the local chain has been verified except a human actually
+speaking the phrase, which no automated test can do.
 
 ## Run it
 
@@ -67,12 +59,15 @@ To rename the robot later, train a new word and change that one line.
 .\.venv\Scripts\python.exe main.py
 ```
 
-Say **"Milo"**, wait for `VOICE STATE : LISTENING`, then say a command:
+Then say:
 
-| English | Hindi | Hinglish |
-| --- | --- | --- |
-| "follow me" | "मेरे साथ चलो" / "मेरे पीछे आओ" | "mere saath chalo" |
-| "stop" | "रुको" / "रुक जाओ" | "ruk jao" |
+> **"Milo, follow me"**
+
+or say **"Milo"**, wait for it to answer *"Yes?"*, then say **"follow me"**.
+To stop: **"Milo, stop"**.
+
+A bare "follow me" with no name is deliberately ignored, so ordinary
+conversation near the laptop does nothing.
 
 Terminal output:
 
@@ -81,7 +76,7 @@ ROBOT STATE : FOLLOWING
 VOICE STATE : LISTENING
 PERSON      : CENTER
 ACTION      : FORWARD
-LAST HEARD  : मेरे साथ चलो
+LAST HEARD  : Milo, follow me
 ```
 
 ### Keys (click the video window first)
@@ -89,8 +84,29 @@ LAST HEARD  : मेरे साथ चलो
 | Key | What it does |
 | --- | --- |
 | `q` | quit cleanly |
-| `f` | pretend you said "follow me" — works with no keys or mic at all |
+| `f` | pretend you said "follow me" — works with no mic at all |
 | `s` | pretend you said "stop" |
+
+## Setup
+
+```powershell
+python -m venv .venv; .\.venv\Scripts\python.exe -m pip install -r requirements.txt
+```
+
+That is enough for English. For Hindi and barge-in, copy `.env.example` to
+`.env` and add:
+
+| Key | Where from |
+| --- | --- |
+| `PICOVOICE_ACCESS_KEY` | https://console.picovoice.ai (free) |
+| `SARVAM_API_KEY` | https://dashboard.sarvam.ai |
+
+**"Milo" is not one of Porcupine's built-in wake words** (those are
+`porcupine`, `bumblebee`, `computer`, `jarvis`, `alexa`...). For the Sarvam
+backend you must train a custom one at console.picovoice.ai, pick
+**Windows (x86_64)**, and set `WAKE_WORD_PPN` to the downloaded `.ppn`.
+The local backend has no such limit — it reads the name from the transcript,
+so renaming the robot is one line in `.env`.
 
 ## Voice interaction states
 
@@ -100,29 +116,39 @@ SLEEPING ──"Milo"──► LISTENING ──you stop talking──► PROCESS
     └──────────── reply finishes ◄──── SPEAKING ◄─────────┘
 ```
 
-Whisper is **not** running continuously. While SLEEPING, the only thing
-listening is Porcupine, which is a tiny on-device model. Audio only leaves
-your laptop after the wake word.
+## How the listening actually works
 
-## Barge-in — what is and isn't real here
+The original version used a single adaptive loudness threshold and it was the
+most fragile thing here: if the room was noisy while it calibrated, the
+threshold landed above the user's voice and the microphone went deaf for the
+whole session while looking perfectly healthy.
 
-**Implemented:** saying the wake word while the robot is talking cuts the
-audio and starts listening again. This works because the robot never says its
-own name, so it cannot interrupt itself.
+It now uses two stages:
 
-**Not implemented:** interrupting on *any* speech. That needs acoustic echo
-cancellation to separate your voice from the robot's own output coming back
-through the microphone, and this prototype does not do AEC. Speaking over the
-robot without saying "Milo" will not stop it.
+1. A **fixed, low** loudness gate (0.004). It never calibrates, so it cannot
+   be poisoned by background noise. It only asks "might something be
+   happening?", cheaply.
+2. **Silero VAD** then decides whether that audio is really speech and trims
+   it. Fans, clicks and door bumps are discarded here — verified: silence and
+   white noise are both rejected.
 
-**Self-triggering is prevented** by construction: the speech recogniser is
-only fed audio in the LISTENING state, so while the robot is speaking there
-is nothing transcribing its output.
+Only what survives both reaches Whisper. The gate can afford to be low
+precisely because something smarter sits behind it.
 
-(Note: this particular laptop's Intel Smart Sound mic array appears to do
-hardware echo cancellation — measured speaker output arriving at the mic at
-0.00006 RMS. That helps, but it is a property of this hardware, not of this
-code, so do not rely on it.)
+## Barge-in — what is and isn't real
+
+**Sarvam backend:** saying the wake word while the robot is talking cuts the
+audio. This works because the robot never says its own name.
+
+**Local backend:** no barge-in. The microphone is deliberately deafened while
+the robot speaks.
+
+**Neither does acoustic echo cancellation.** Interrupting by talking over the
+robot without saying its name is not supported, and this prototype does not
+fake it.
+
+**Self-triggering is prevented in both** by disarming microphone capture while
+the robot speaks, so it can never transcribe its own voice.
 
 ## The files
 
@@ -130,28 +156,28 @@ code, so do not rely on it.)
 | --- | --- |
 | `main.py` | camera loop, terminal output, wiring |
 | `vision.py` | camera, YOLO, LEFT/CENTER/RIGHT, box freshness, drawing |
-| `behavior.py` | the robot state machine — pure functions, unchanged |
-| `voice.py` | SLEEPING/LISTENING/PROCESSING/SPEAKING orchestration |
-| `audio_in.py` | one microphone shared by the wake word and the recogniser |
-| `wakeword.py` | Porcupine |
+| `behavior.py` | the robot state machine — pure functions |
+| `voice.py` | conversation loop, both backends |
+| `audio_in.py` | one microphone shared by everything |
+| `local_stt.py` | offline VAD + Whisper (default) |
 | `stt.py` | Sarvam realtime speech-to-text |
+| `wakeword.py` | Porcupine (Sarvam backend only) |
 | `tts.py` | Sarvam streaming voice, pyttsx3 fallback |
-| `commands.py` | conservative EN/HI/Hinglish command matching |
+| `commands.py` | conservative command matching + wake-word splitting |
 | `config.py` | reads `.env` |
-| `speech.py` | **legacy**, unused — the old local-Whisper input |
+| `speech.py` | **legacy**, unused — the old threshold-based input |
 
 ## Testing
 
+None of these need keys or a network:
+
 ```powershell
-.\.venv\Scripts\python.exe selftest_voice.py
+.\.venv\Scripts\python.exe test_local_voice.py
 ```
 
-Runs eight stages in the order things break, and tells you which one failed:
-config → microphone → wake word → STT English → STT Hindi → TTS English →
-TTS Hindi → command matching. Run a single stage with e.g.
-`selftest_voice.py 3`.
-
-Others, none of which need keys or a network:
+```powershell
+.\.venv\Scripts\python.exe test_voice_flow.py
+```
 
 ```powershell
 .\.venv\Scripts\python.exe test_commands.py
@@ -165,26 +191,23 @@ Others, none of which need keys or a network:
 .\.venv\Scripts\python.exe selftest_pipeline.py
 ```
 
-```powershell
-.\.venv\Scripts\python.exe behavior.py
-```
-
-`selftest_vision.py` needs the camera and a person in frame. `audio_in.py`,
-`wakeword.py`, `stt.py` and `tts.py` each run standalone as their own test.
+- `test_local_voice.py` — renders phrases with the Windows voice and pushes
+  them through VAD → Whisper → matching. Covers everything but the mic.
+- `test_voice_flow.py` — scripted conversations; proves a bare "follow me"
+  while asleep is ignored.
+- `selftest_voice.py` — eight staged live checks, mostly for the Sarvam path.
+- `audio_in.py`, `local_stt.py` run standalone as their own live tests.
 
 ## When something breaks
 
-**"could not open camera 0"** — Teams, Zoom or the Camera app is holding it,
-or the privacy shutter is closed. The app warns you if the camera is
-returning a blank privacy placeholder.
+**It never hears me.** Run `python audio_in.py` and make noise. If the level
+stays near 0.00005 the mic is muted in Windows — there is often a dedicated
+mic-mute key with an LED. That is not a code problem.
 
-**Wake word never fires** — run `selftest_voice.py 2` first. If the mic is
-silent, it is muted in Windows (there is often a dedicated mic-mute key with
-an LED), not a code problem. If the mic is fine, raise `WAKE_SENSITIVITY`
-toward 1.0 in `.env`.
-
-**It wakes but understands nothing** — `selftest_voice.py 4`. Usually a
-missing or expired `SARVAM_API_KEY`, or no network.
+**It hears me but ignores me.** Run `main.py --debug-audio` to see every
+transcript. If Whisper writes something other than "Milo", add that spelling
+to `WAKE_VARIANTS` in `commands.py`. If it mishears the command, try
+`--whisper-model base.en`.
 
 **Detection is slow.** Live-camera measurements, whole loop:
 
@@ -202,25 +225,21 @@ threads is *slower*.
 | Option | Why |
 | --- | --- |
 | `--no-voice` | skip the mic entirely, use `f` / `s` |
-| `--debug-audio` | print wake-word hits and partial transcripts |
+| `--debug-audio` | print every transcript, including discarded noise |
+| `--voice-backend local` | force offline mode even if keys exist |
+| `--whisper-model base.en` | more accurate, roughly twice as slow |
 | `--camera 1` | if the wrong camera opens |
-| `--mic 5` | pick a specific microphone |
 | `--imgsz 320` | faster detection |
-| `--detect-every 2` | detect on every other frame |
-| `--no-mirror` | raw camera view instead of mirrored |
-| `--center-band 0.5` | wider CENTER zone, so FORWARD triggers more |
 | `--seconds 30` | quit automatically, for unattended testing |
 
 ## Known limits
 
 - One person only — it follows the largest box in the frame.
 - No distance sensing, so `FORWARD` doesn't know how far away you are.
-- Two commands only. Add more in `commands.py` and give them a rule in
-  `behavior.py`.
-- A new WebSocket is opened per utterance, which costs a few hundred
-  milliseconds. A persistent connection would be faster but harder to read.
-- Command matching is a fixed phrase list, so a phrasing nobody thought of
-  will not be understood. That is deliberate — loose matching used to fire
-  on "we should stop for lunch".
-- Sarvam calls send your audio to Sarvam's servers. Only after the wake word,
-  but it is not local.
+- Local mode is English only. Hindi needs the Sarvam backend.
+- Local mode has no barge-in.
+- Two commands only. Add more in `commands.py` and `behavior.py`.
+- Roughly 1.5–2 s from finishing a sentence to the action changing: 0.7 s to
+  notice you stopped, then Whisper.
+- Command matching is a fixed phrase list, so unanticipated phrasing will not
+  be understood. That is deliberate.
